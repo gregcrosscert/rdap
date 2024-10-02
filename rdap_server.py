@@ -105,14 +105,11 @@ def map_whois_to_rdap(whois_data, domain_name):
             {
                 "title": "RDDS Inaccuracy Complaint Form",
                 "description": [
-                    "This domain's registration data is provided "
-                    "subject to the Terms of Use. If you believe "
-                    "that the data is inaccurate, please let us "
-                    "know by visiting https://www.icann.org/wicf"
+                    "URL of the ICANN RDDS Inaccuracy Complaint Form: https://icann.org/wicf"
                 ],
                 "links": [
                     {
-                        "href": "https://www.icann.org/wicf",
+                        "href": "https://icann.org/wicf",
                         "rel": "alternate"
                     }
                 ]
@@ -207,11 +204,8 @@ def map_whois_to_rdap(whois_data, domain_name):
             [
                 ["version", {}, "text", "4.0"],
                 ["fn", {}, "text", registrar],
-                ["kind", {}, "text", "org"],
-                ["adr", {}, "text", [
-                    "", "", "68 Willow Road", "Menlo Park",
-                    "CA", "94025", "US"
-                ]]
+                #["kind", {}, "text", "org"],
+                #["adr", {}, "text", [ "", "", "68 Willow Road", "Menlo Park", "CA", "94025", "US" ]]
             ]
         ]
 
