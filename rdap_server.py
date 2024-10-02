@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request, Response, make_response
+from flask import Flask, request, make_response
 from flask_cors import CORS
 import whois
 import datetime
@@ -9,14 +9,11 @@ app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
 def parse_date(date_str):
-    """
-    Parses a date string into a datetime object.
-    """
     date_formats = [
-        "%Y-%m-%d %H:%M:%S%z",  # e.g., "2024-08-02 02:17:33+00:00"
-        "%Y-%m-%d %H:%M:%S",    # e.g., "2019-09-09 15:39:04"
-        "%Y-%m-%dT%H:%M:%SZ",   # e.g., "2024-08-02T02:17:33Z"
-        "%Y-%m-%d"              # e.g., "2024-08-02"
+        "%Y-%m-%d %H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%d"
     ]
     for fmt in date_formats:
         try:
@@ -34,7 +31,9 @@ def format_date(dt):
             elif isinstance(d, str):
                 parsed_date = parse_date(d)
                 if parsed_date:
-                    formatted_dates.append(parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ"))
+                    formatted_dates.append(
+                        parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+                    )
         return formatted_dates
     elif isinstance(dt, datetime.datetime):
         return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -44,11 +43,21 @@ def format_date(dt):
             return parsed_date.strftime("%Y-%m-%dT%H:%M:%SZ")
     return None
 
+def generate_handle(domain_name):
+    # Replace non-word characters with underscores
+    unique_id = re.sub(r'\W', '_', domain_name)
+    unique_id = unique_id[:80]  # Truncate to 80 characters
+    repository_id = 'COSMOTOWN'
+    handle = f"{unique_id}-{repository_id}"
+    return handle
+
 def map_whois_to_rdap(whois_data, domain_name):
+    normalized_domain = domain_name.lower()
     rdap_response = {
         "objectClassName": "domain",
-        "handle": whois_data.get('registry_domain_id', f"{domain_name.upper()}-DOMAIN"),
-        "ldhName": domain_name.lower(),
+        "handle": whois_data.get('registry_domain_id') or
+                  generate_handle(normalized_domain),
+        "ldhName": normalized_domain,
         "unicodeName": domain_name,
         "status": [],
         "entities": [],
@@ -57,28 +66,72 @@ def map_whois_to_rdap(whois_data, domain_name):
         "secureDNS": {
             "delegationSigned": False
         },
-        "links": [],
-        "notices": [],
+        "links": [
+            {
+                "value": f"https://www.cosmotown.com/rdap/domain/"
+                         f"{normalized_domain}",
+                "rel": "self",
+                "href": f"https://www.cosmotown.com/rdap/domain/"
+                        f"{normalized_domain}",
+                "type": "application/rdap+json"
+            }
+        ],
+        "notices": [
+            {
+                "title": "Terms of Use",
+                "description": [
+                    "Service subject to Terms of Use."
+                ],
+                "links": [
+                    {
+                        "href": "https://www.cosmotown.com/terms",
+                        "rel": "alternate"
+                    }
+                ]
+            },
+            {
+                "title": "Status Codes",
+                "description": [
+                    "For more information on domain status codes, "
+                    "please visit https://icann.org/epp"
+                ],
+                "links": [
+                    {
+                        "href": "https://icann.org/epp",
+                        "rel": "alternate"
+                    }
+                ]
+            },
+            {
+                "title": "RDDS Inaccuracy Complaint Form",
+                "description": [
+                    "This domain's registration data is provided "
+                    "subject to the Terms of Use. If you believe "
+                    "that the data is inaccurate, please let us "
+                    "know by visiting https://www.icann.org/wicf"
+                ],
+                "links": [
+                    {
+                        "href": "https://www.icann.org/wicf",
+                        "rel": "alternate"
+                    }
+                ]
+            }
+        ],
         "rdapConformance": [
             "rdap_level_0",
             "icann_rdap_technical_implementation_guide_0",
             "icann_rdap_response_profile_0"
-        ],
+        ]
     }
-
-    if whois_data is None:
-        return rdap_response
 
     # Map 'status'
     status = whois_data.get('status') or whois_data.get('domain_status')
     if status:
         if isinstance(status, list):
-            # Normalize and deduplicate statuses
             status_normalized = set()
             for s in status:
-                # Remove URLs and parentheses
                 s_clean = re.sub(r'\s*\(.*\)|\s*https?://\S+', '', s).strip()
-                # Insert spaces before capital letters
                 s_with_spaces = re.sub(r'(?<!^)(?=[A-Z])', ' ', s_clean)
                 s_lower = s_with_spaces.lower()
                 status_normalized.add(s_lower)
@@ -92,9 +145,12 @@ def map_whois_to_rdap(whois_data, domain_name):
     # Map 'events'
     events = []
     event_actions = set()
-    for event_name, event_action in [('creation_date', 'registration'),
-                                     ('updated_date', 'last update of registration'),
-                                     ('expiration_date', 'expiration')]:
+    event_mapping = [
+        ('creation_date', 'registration'),
+        ('updated_date', 'last changed'),
+        ('expiration_date', 'expiration')
+    ]
+    for event_name, event_action in event_mapping:
         event_date = whois_data.get(event_name)
         if event_date:
             formatted_dates = format_date(event_date)
@@ -116,59 +172,48 @@ def map_whois_to_rdap(whois_data, domain_name):
     # Add 'last update of RDAP database' event
     events.append({
         "eventAction": "last update of RDAP database",
-        "eventDate": datetime.datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+        "eventDate": datetime.datetime.utcnow().strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
     })
     rdap_response['events'] = events
 
     # Map 'nameservers'
-    name_servers = whois_data.get('name_servers') or whois_data.get('name_server')
+    name_servers = whois_data.get('name_servers') or \
+                   whois_data.get('name_server')
     if name_servers:
         if isinstance(name_servers, str):
             name_servers = name_servers.split()
-        # Normalize to lowercase and deduplicate
         ns_set = set(ns.lower() for ns in name_servers)
-        rdap_response['nameservers'] = [{"objectClassName": "nameserver", "ldhName": ns} for ns in ns_set]
+        rdap_response['nameservers'] = [
+            {
+                "objectClassName": "nameserver",
+                "ldhName": ns
+            } for ns in ns_set
+        ]
 
     # Map 'entities' (Registrar)
     registrar = whois_data.get('registrar')
     if registrar:
-        # Set IANA ID manually for known registrars
         registrar_iana_id = whois_data.get('registrar_iana_id', '')
         if not registrar_iana_id:
             if 'cosmotown' in registrar.lower():
                 registrar_iana_id = '1509'
             elif 'markmonitor' in registrar.lower():
                 registrar_iana_id = '292'
-            # Add more registrars as needed
 
-        # Build vCard for registrar
         vcard_array = [
             "vcard",
             [
                 ["version", {}, "text", "4.0"],
                 ["fn", {}, "text", registrar],
-                ["kind", {}, "text", "org"]
+                ["kind", {}, "text", "org"],
+                ["adr", {}, "text", [
+                    "", "", "68 Willow Road", "Menlo Park",
+                    "CA", "94025", "US"
+                ]]
             ]
         ]
-
-        # Structured address
-        if 'cosmotown' in registrar.lower():
-            vcard_array[1].append([
-                "adr",
-                {
-                    "label": "68 Willow Road\nMenlo Park\nCA\n94025\nUS"
-                },
-                "text",
-                [
-                    "",  # Post Office Box
-                    "",  # Extended Address
-                    "68 Willow Road",  # Street Address
-                    "Menlo Park",  # Locality
-                    "CA",  # Region
-                    "94025",  # Postal Code
-                    "US"  # Country (use country code)
-                ]
-            ])
 
         registrar_entity = {
             "objectClassName": "entity",
@@ -184,110 +229,36 @@ def map_whois_to_rdap(whois_data, domain_name):
             "entities": []
         }
 
-        # Add 'abuse' contact if available
-        abuse_emails = None
-        abuse_phone = whois_data.get('registrar_abuse_contact_phone')
-        emails = whois_data.get('emails')
-        if emails:
-            if isinstance(emails, list):
-                abuse_emails = [email for email in emails if 'abuse' in email.lower()]
-            elif 'abuse' in emails.lower():
-                abuse_emails = [emails]
-        if not abuse_emails and 'cosmotown' in registrar.lower():
-            # Hardcode abuse email for Cosmotown
-            abuse_emails = ['abuse@cosmotown.com']
-        if not abuse_phone and 'cosmotown' in registrar.lower():
-            abuse_phone = '+1.6503198930'
+        # Add 'abuse' contact
+        abuse_emails = ['abuse@cosmotown.com']
+        abuse_phone = '+1.6503198930'
 
-        if abuse_emails or abuse_phone:
-            abuse_entity = {
-                "objectClassName": "entity",
-                "roles": ["abuse"],
-                "vcardArray": [
-                    "vcard",
-                    [
-                        ["version", {}, "text", "4.0"],
-                        ["fn", {}, "text", "Abuse Contact"],
-                        ["kind", {}, "text", "individual"]
-                    ]
+        abuse_entity = {
+            "objectClassName": "entity",
+            "roles": ["abuse"],
+            "vcardArray": [
+                "vcard",
+                [
+                    ["version", {}, "text", "4.0"],
+                    ["fn", {}, "text", "Abuse Contact"],
+                    ["kind", {}, "text", "individual"],
+                    ["tel", {"type": ["voice", "work"]},
+                     "uri", f"tel:{abuse_phone}"],
+                    ["email", {"type": "work"}, "text",
+                     abuse_emails[0]]
                 ]
-            }
-            if abuse_phone:
-                abuse_entity['vcardArray'][1].append(["tel", {"type": ["voice", "work"]}, "uri", f"tel:{abuse_phone}"])
-            if abuse_emails:
-                for email in abuse_emails:
-                    abuse_entity['vcardArray'][1].append(["email", {"type": "work"}, "text", email])
-            registrar_entity['entities'].append(abuse_entity)
-
+            ]
+        }
+        registrar_entity['entities'].append(abuse_entity)
         rdap_response['entities'].append(registrar_entity)
 
     # Map 'secureDNS'
-    rdap_response['secureDNS']['delegationSigned'] = whois_data.get('dnssec', '').lower() == 'signeddelegation'
-
-    # Map 'links'
-    rdap_response['links'] = [
-        {
-            "value": f"https://www.cosmotown.com/rdap/domain/{domain_name.lower()}",
-            "rel": "self",
-            "href": f"https://www.cosmotown.com/rdap/domain/{domain_name.lower()}",
-            "mediaType": "application/rdap+json"
-        }
-    ]
-    # Add registrar RDAP link if available
-    registrar_whois_server = whois_data.get('registrar_whois_server') or whois_data.get('whois_server')
-    if registrar_whois_server:
-        rdap_response['links'].append({
-            "value": f"https://{registrar_whois_server}/domain/{domain_name.lower()}",
-            "rel": "related",
-            "href": f"https://{registrar_whois_server}/domain/{domain_name.lower()}",
-            "mediaType": "application/rdap+json"
-        })
-
-    # Map 'notices'
-    rdap_response['notices'] = [
-        {
-            "title": "Terms of Use",
-            "description": [
-                "Service subject to Terms of Use."
-            ],
-            "links": [
-                {
-                    "href": "https://www.cosmotown.com/terms",
-                    "rel": "alternate",
-                    "mediaType": "text/html"
-                }
-            ]
-        },
-        {
-            "title": "Status Codes",
-            "description": [
-                "For more information on domain status codes, please visit https://icann.org/epp"
-            ],
-            "links": [
-                {
-                    "href": "https://icann.org/epp",
-                    "rel": "alternate",
-                    "mediaType": "text/html"
-                }
-            ]
-        },
-        {
-            "title": "RDDS Inaccuracy Complaint Form",
-            "description": [
-                "URL of the ICANN RDDS Inaccuracy Complaint Form: https://www.icann.org/wicf"
-            ],
-            "links": [
-                {
-                    "href": "https://www.icann.org/wicf",
-                    "rel": "alternate",
-                    "mediaType": "text/html"
-                }
-            ]
-        }
-    ]
+    rdap_response['secureDNS']['delegationSigned'] = \
+        whois_data.get('dnssec', '').lower() == 'signeddelegation'
 
     # Map 'port43' (WHOIS Server)
-    whois_server = whois_data.get('whois_server') or whois_data.get('registrar_whois_server')
+    whois_server = whois_data.get('whois_server') or \
+                   whois_data.get('registrar_whois_server')
     if whois_server:
         rdap_response['port43'] = whois_server
 
@@ -301,7 +272,8 @@ def add_cors_headers(response):
 @app.route('/domain/<path:domain_name>', methods=['GET'])
 def domain_lookup(domain_name):
     try:
-        whois_data = whois.whois(domain_name)
+        normalized_domain = domain_name.lower()
+        whois_data = whois.whois(normalized_domain)
         rdap_response = map_whois_to_rdap(whois_data, domain_name)
         response = make_response(json.dumps(rdap_response))
         response.headers['Content-Type'] = 'application/rdap+json'
@@ -323,7 +295,5 @@ def domain_lookup(domain_name):
         response.headers['Access-Control-Allow-Origin'] = '*'
         return response
 
-# [Other functions remain unchanged but ensure similar updates are applied]
-
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=9100)
+    app.run(host='::', port=9100)  # Listen on IPv6 and IPv4
