@@ -1,4 +1,4 @@
 Flask
 python-whois
 gunicorn
-
+Flask-Cors

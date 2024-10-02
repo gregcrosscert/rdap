@@ -1,9 +1,12 @@
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, make_response
+from flask_cors import CORS
 import whois
 import datetime
 import re
+import json
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes
 
 def parse_date(date_str):
     """
@@ -44,16 +47,17 @@ def format_date(dt):
 def map_whois_to_rdap(whois_data, domain_name):
     rdap_response = {
         "objectClassName": "domain",
-        "handle": whois_data.get('registry_domain_id', ''),
-        "ldhName": domain_name.upper(),
+        "handle": whois_data.get('registry_domain_id', f"{domain_name.upper()}-DOMAIN"),
+        "ldhName": domain_name.lower(),
+        "unicodeName": domain_name,
         "status": [],
         "entities": [],
         "events": [],
         "nameservers": [],
-        "links": [],
         "secureDNS": {
             "delegationSigned": False
         },
+        "links": [],
         "notices": [],
         "rdapConformance": [
             "rdap_level_0",
@@ -87,25 +91,28 @@ def map_whois_to_rdap(whois_data, domain_name):
 
     # Map 'events'
     events = []
+    event_actions = set()
     for event_name, event_action in [('creation_date', 'registration'),
-                                     ('updated_date', 'last changed'),
+                                     ('updated_date', 'last update of registration'),
                                      ('expiration_date', 'expiration')]:
         event_date = whois_data.get(event_name)
         if event_date:
             formatted_dates = format_date(event_date)
             if isinstance(formatted_dates, list):
                 for date in formatted_dates:
-                    if date:
+                    if date and event_action not in event_actions:
                         events.append({
                             "eventAction": event_action,
                             "eventDate": date
                         })
+                        event_actions.add(event_action)
             else:
-                if formatted_dates:
+                if formatted_dates and event_action not in event_actions:
                     events.append({
                         "eventAction": event_action,
                         "eventDate": formatted_dates
                     })
+                    event_actions.add(event_action)
     # Add 'last update of RDAP database' event
     events.append({
         "eventAction": "last update of RDAP database",
@@ -118,8 +125,8 @@ def map_whois_to_rdap(whois_data, domain_name):
     if name_servers:
         if isinstance(name_servers, str):
             name_servers = name_servers.split()
-        # Normalize to uppercase and deduplicate
-        ns_set = set(ns.upper() for ns in name_servers)
+        # Normalize to lowercase and deduplicate
+        ns_set = set(ns.lower() for ns in name_servers)
         rdap_response['nameservers'] = [{"objectClassName": "nameserver", "ldhName": ns} for ns in ns_set]
 
     # Map 'entities' (Registrar)
@@ -140,23 +147,26 @@ def map_whois_to_rdap(whois_data, domain_name):
             [
                 ["version", {}, "text", "4.0"],
                 ["fn", {}, "text", registrar],
+                ["kind", {}, "text", "org"]
             ]
         ]
 
-        # Hardcode address for Cosmotown
+        # Structured address
         if 'cosmotown' in registrar.lower():
             vcard_array[1].append([
                 "adr",
-                {},
+                {
+                    "label": "68 Willow Road\nMenlo Park\nCA\n94025\nUS"
+                },
                 "text",
                 [
-                    None,
-                    None,
-                    "68 Willow Road",
-                    "Menlo Park",
-                    "CA",
-                    "94025",
-                    "US"
+                    "",  # Post Office Box
+                    "",  # Extended Address
+                    "68 Willow Road",  # Street Address
+                    "Menlo Park",  # Locality
+                    "CA",  # Region
+                    "94025",  # Postal Code
+                    "US"  # Country (use country code)
                 ]
             ])
 
@@ -186,6 +196,8 @@ def map_whois_to_rdap(whois_data, domain_name):
         if not abuse_emails and 'cosmotown' in registrar.lower():
             # Hardcode abuse email for Cosmotown
             abuse_emails = ['abuse@cosmotown.com']
+        if not abuse_phone and 'cosmotown' in registrar.lower():
+            abuse_phone = '+1.6503198930'
 
         if abuse_emails or abuse_phone:
             abuse_entity = {
@@ -195,43 +207,17 @@ def map_whois_to_rdap(whois_data, domain_name):
                     "vcard",
                     [
                         ["version", {}, "text", "4.0"],
-                        ["fn", {}, "text", "Abuse Contact"]
+                        ["fn", {}, "text", "Abuse Contact"],
+                        ["kind", {}, "text", "individual"]
                     ]
                 ]
             }
             if abuse_phone:
-                abuse_entity['vcardArray'][1].append(["tel", {"type": "voice"}, "uri", f"tel:{abuse_phone}"])
+                abuse_entity['vcardArray'][1].append(["tel", {"type": ["voice", "work"]}, "uri", f"tel:{abuse_phone}"])
             if abuse_emails:
                 for email in abuse_emails:
-                    abuse_entity['vcardArray'][1].append(["email", {}, "text", email])
+                    abuse_entity['vcardArray'][1].append(["email", {"type": "work"}, "text", email])
             registrar_entity['entities'].append(abuse_entity)
-
-        # Add 'privacy' contact if available
-        privacy_emails = None
-        if emails:
-            if isinstance(emails, list):
-                privacy_emails = [email for email in emails if 'privacy' in email.lower()]
-            elif 'privacy' in emails.lower():
-                privacy_emails = [emails]
-        if not privacy_emails and 'cosmotown' in registrar.lower():
-            # Hardcode privacy email for Cosmotown
-            privacy_emails = ['privacy@cosmotown.com']
-
-        if privacy_emails:
-            privacy_entity = {
-                "objectClassName": "entity",
-                "roles": ["privacy"],
-                "vcardArray": [
-                    "vcard",
-                    [
-                        ["version", {}, "text", "4.0"],
-                        ["fn", {}, "text", "Privacy Contact"]
-                    ]
-                ]
-            }
-            for email in privacy_emails:
-                privacy_entity['vcardArray'][1].append(["email", {}, "text", email])
-            registrar_entity['entities'].append(privacy_entity)
 
         rdap_response['entities'].append(registrar_entity)
 
@@ -241,20 +227,20 @@ def map_whois_to_rdap(whois_data, domain_name):
     # Map 'links'
     rdap_response['links'] = [
         {
-            "value": f"https://www.cosmotown.com/rdap/domain/{domain_name.upper()}",
+            "value": f"https://www.cosmotown.com/rdap/domain/{domain_name.lower()}",
             "rel": "self",
-            "href": f"https://www.cosmotown.com/rdap/domain/{domain_name.upper()}",
-            "type": "application/rdap+json"
+            "href": f"https://www.cosmotown.com/rdap/domain/{domain_name.lower()}",
+            "mediaType": "application/rdap+json"
         }
     ]
     # Add registrar RDAP link if available
     registrar_whois_server = whois_data.get('registrar_whois_server') or whois_data.get('whois_server')
     if registrar_whois_server:
         rdap_response['links'].append({
-            "value": f"https://{registrar_whois_server}/domain/{domain_name.upper()}",
+            "value": f"https://{registrar_whois_server}/domain/{domain_name.lower()}",
             "rel": "related",
-            "href": f"https://{registrar_whois_server}/domain/{domain_name.upper()}",
-            "type": "application/rdap+json"
+            "href": f"https://{registrar_whois_server}/domain/{domain_name.lower()}",
+            "mediaType": "application/rdap+json"
         })
 
     # Map 'notices'
@@ -267,7 +253,34 @@ def map_whois_to_rdap(whois_data, domain_name):
             "links": [
                 {
                     "href": "https://www.cosmotown.com/terms",
-                    "type": "text/html"
+                    "rel": "alternate",
+                    "mediaType": "text/html"
+                }
+            ]
+        },
+        {
+            "title": "Status Codes",
+            "description": [
+                "For more information on domain status codes, please visit https://icann.org/epp"
+            ],
+            "links": [
+                {
+                    "href": "https://icann.org/epp",
+                    "rel": "alternate",
+                    "mediaType": "text/html"
+                }
+            ]
+        },
+        {
+            "title": "RDDS Inaccuracy Complaint Form",
+            "description": [
+                "URL of the ICANN RDDS Inaccuracy Complaint Form: https://www.icann.org/wicf"
+            ],
+            "links": [
+                {
+                    "href": "https://www.icann.org/wicf",
+                    "rel": "alternate",
+                    "mediaType": "text/html"
                 }
             ]
         }
@@ -280,30 +293,37 @@ def map_whois_to_rdap(whois_data, domain_name):
 
     return rdap_response
 
-@app.route('/domain/<domain_name>', methods=['GET'])
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    return response
+
+@app.route('/domain/<path:domain_name>', methods=['GET'])
 def domain_lookup(domain_name):
     try:
         whois_data = whois.whois(domain_name)
         rdap_response = map_whois_to_rdap(whois_data, domain_name)
-        response = jsonify(rdap_response)
+        response = make_response(json.dumps(rdap_response))
         response.headers['Content-Type'] = 'application/rdap+json'
+        response.headers['Access-Control-Allow-Origin'] = '*'
         return response
     except Exception as e:
         error_response = {
             "errorCode": 500,
             "title": "Internal Server Error",
-            "description": [
-                str(e)
-            ],
+            "description": [str(e)],
             "rdapConformance": [
                 "rdap_level_0",
                 "icann_rdap_technical_implementation_guide_0",
                 "icann_rdap_response_profile_0"
             ]
         }
-        response = jsonify(error_response)
+        response = make_response(json.dumps(error_response), 500)
         response.headers['Content-Type'] = 'application/rdap+json'
-        return response, 500
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        return response
+
+# [Other functions remain unchanged but ensure similar updates are applied]
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=3030)
+    app.run(host='0.0.0.0', port=9100)
