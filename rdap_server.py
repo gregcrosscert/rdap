@@ -51,12 +51,20 @@ def generate_handle(domain_name):
     handle = f"{unique_id}-{repository_id}"
     return handle
 
+
+def extract_registry_domain_id(raw_text):
+    match = re.search(r'Registry Domain ID:\s*(.+)', raw_text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
+
 def map_whois_to_rdap(whois_data, domain_name):
     normalized_domain = domain_name.lower()
+    raw_text = whois_data.text
+    registry_domain_id = extract_registry_domain_id(raw_text)
     rdap_response = {
         "objectClassName": "domain",
-        "handle": whois_data.get('registry_domain_id') or
-                  generate_handle(normalized_domain),
+        "handle": registry_domain_id or generate_handle(normalized_domain),
         "ldhName": normalized_domain,
         "unicodeName": domain_name,
         "status": [],
